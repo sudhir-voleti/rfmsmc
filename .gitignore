@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Results (regenerated)
+04_results/
+data/*.csv
+data/*.zip
+
+# Model outputs
+*.pkl
+*.nc
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
