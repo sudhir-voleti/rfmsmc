@@ -1,0 +1,30 @@
+
+---
+
+### File: `config.yaml`
+
+```yaml
+# RFM-HMM-SMC Configuration
+
+paths:
+  data_dir: "./data"
+  results_dir: "./04_results"
+  tables_dir: "./04_results/tables"
+  figures_dir: "./04_results/figures"
+
+model_defaults:
+  K: 2
+  use_gam: true
+  gam_df: 3
+  shared_phi: true
+  phi_sort: true
+  state_specific_p: false
+  p_fixed: 1.5
+  gamma_diag: 1.0
+  emission_type: "tweedie"
+
+smc_defaults:
+  draws: 200
+  chains: 4
+  threshold: 0.8
+  seed: 42
