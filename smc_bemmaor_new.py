@@ -584,7 +584,7 @@ def compute_hmm_clv_local(idata, discount_rate=0.10):
 def make_bemmaor_hmm(data, K, use_gam=True, pilot=False):
     """
     Bemmaor & Glady (2012) HMM with correlated NBD-Gamma.
-    use_gam: if True, use GAM splines; if False, use GLM (linear)
+    K >= 2 required for phase transition study.
     """
     y = data['y']
     mask = data['mask']
@@ -600,16 +600,11 @@ def make_bemmaor_hmm(data, K, use_gam=True, pilot=False):
     }) as model:
 
         # =====================================================================
-        # 1. LATENT DYNAMICS
+        # 1. LATENT DYNAMICS (K >= 2)
         # =====================================================================
-        if K == 1:
-            pi0 = pt.as_tensor_variable(np.array([1.0], dtype=np.float32))
-            Gamma = pt.as_tensor_variable(np.array([[1.0]], dtype=np.float32))
-            log_Gamma = pt.as_tensor_variable(np.array([[0.0]], dtype=np.float32))
-        else:
-            Gamma = pm.Dirichlet("Gamma", a=np.ones(K) * 1.1, shape=(K, K))
-            pi0 = pm.Dirichlet("pi0", a=np.ones(K, dtype=np.float32))
-            log_Gamma = pt.log(Gamma)
+        Gamma = pm.Dirichlet("Gamma", a=np.ones(K) * 1.1, shape=(K, K))
+        pi0 = pm.Dirichlet("pi0", a=np.ones(K, dtype=np.float32))
+        log_Gamma = pt.log(Gamma)
 
         # =====================================================================
         # 2. SHARED LATENT FACTOR (Anchored)
@@ -625,100 +620,66 @@ def make_bemmaor_hmm(data, K, use_gam=True, pilot=False):
         # 3. NBD PART (Zero/Frequency, Correlated)
         # =====================================================================
         # Log-space parameterization for numerical stability
-        log_r = pm.Normal("log_r", 0, 1, shape=K if K > 1 else None, initval=0.0)
+        log_r = pm.Normal("log_r", 0, 1, shape=K, initval=0.0)
         r_nb = pm.Deterministic("r_nb", pt.exp(log_r))
 
         # Lambda (mean frequency) parameterization
-        if K == 1:
-            alpha_h = pm.Normal("alpha_h", 0, 1, initval=0.0)
-            log_lam = alpha_h + gamma_h * theta
-        else:
-            alpha_h = pm.Normal("alpha_h", 0, 1, shape=K, initval=0.0)
-            log_lam = alpha_h[None, None, :] + gamma_h * theta[:, :, None]
-
+        alpha_h = pm.Normal("alpha_h", 0, 1, shape=K, initval=0.0)
+        log_lam = alpha_h[None, None, :] + gamma_h * theta[:, :, None]
         lam = pt.exp(pt.clip(log_lam, -10, 10))
 
         # NBD P(y=0) = (r/(r+lam))^r
-        if K == 1:
-            log_p_zero_nbd = r_nb * (pt.log(r_nb) - pt.log(r_nb + lam.squeeze()))
-        else:
-            r_exp = r_nb[None, None, :]
-            lam_exp = lam
-            log_p_zero_nbd = r_exp * (pt.log(r_exp) - pt.log(r_exp + lam_exp))
+        r_exp = r_nb[None, None, :]
+        lam_exp = lam
+        log_p_zero_nbd = r_exp * (pt.log(r_exp) - pt.log(r_exp + lam_exp))
 
         # =====================================================================
         # 4. GAMMA PART (Spend, Correlated)
         # =====================================================================
         # Log-space shape for numerical stability
-        if K == 1:
-            beta_m_raw = pm.Normal("beta_m_raw", 0, 1, initval=0.0)
-            beta_m = beta_m_raw
-            log_alpha_gamma = pm.Normal("log_alpha_gamma", 0, 1, initval=0.0)
-        else:
-            # Ordered intercepts for identifiability
-            beta_m_raw = pm.Normal("beta_m_raw", 0, 1, shape=K, initval=0.0)
-            beta_m = pm.Deterministic("beta_m", pt.sort(beta_m_raw))
-            log_alpha_gamma = pm.Normal("log_alpha_gamma", 0, 1, shape=K, initval=0.0)
-
+        # Ordered intercepts for identifiability
+        beta_m_raw = pm.Normal("beta_m_raw", 0, 1, shape=K, initval=0.0)
+        beta_m = pm.Deterministic("beta_m", pt.sort(beta_m_raw))
+        log_alpha_gamma = pm.Normal("log_alpha_gamma", 0, 1, shape=K, initval=0.0)
         alpha_gamma = pm.Deterministic("alpha_gamma", pt.exp(log_alpha_gamma))
 
         # mu parameterized with anchored gamma_m
-        if K == 1:
-            log_mu = beta_m + gamma_m * theta.squeeze()
-        else:
-            log_mu = beta_m[None, None, :] + gamma_m * theta[:, :, None]
-
+        log_mu = beta_m[None, None, :] + gamma_m * theta[:, :, None]
         mu = pt.exp(pt.clip(log_mu, -10, 10))
         beta_gamma = alpha_gamma / mu
 
         # =====================================================================
         # 5. EMISSION LIKELIHOOD
         # =====================================================================
-        if K == 1:
-            log_zero = log_p_zero_nbd
+        y_exp = y[..., None]
+        mask_exp = mask[..., None]
 
-            y_clipped = pt.clip(y, 1e-10, 1e10)
-            log_gamma = ((alpha_gamma - 1) * pt.log(y_clipped) -
-                        beta_gamma * y +
-                        alpha_gamma * pt.log(beta_gamma) -
-                        pt.gammaln(alpha_gamma))
+        log_zero = log_p_zero_nbd
 
-            # P(y>0) = 1 - P(y=0)
-            log_pos = pt.log1p(-pt.exp(log_zero) + 1e-10) + log_gamma
-            log_emission = pt.where(y == 0, log_zero, log_pos)
-            log_emission = pt.where(mask, log_emission, 0.0)
-            logp_cust = pt.sum(log_emission, axis=1)
+        # P(y>0) = 1 - P(y=0)
+        log_p_pos = pt.log1p(-pt.exp(log_zero) + 1e-10)
 
-        else:
-            y_exp = y[..., None]
-            mask_exp = mask[..., None]
+        y_clipped = pt.clip(y_exp, 1e-10, 1e10)
+        alpha_exp = alpha_gamma[None, None, :]
+        beta_exp = beta_gamma
 
-            log_zero = log_p_zero_nbd
+        log_gamma = ((alpha_exp - 1) * pt.log(y_clipped) -
+                     beta_exp * y_exp +
+                     alpha_exp * pt.log(beta_exp) -
+                     pt.gammaln(alpha_exp))
 
-            # P(y>0) = 1 - P(y=0)
-            log_p_pos = pt.log1p(-pt.exp(log_zero) + 1e-10)
+        log_pos = log_p_pos + log_gamma
+        log_emission = pt.where(pt.eq(y_exp, 0), log_zero, log_pos)
+        log_emission = pt.where(mask_exp, log_emission, 0.0)
 
-            y_clipped = pt.clip(y_exp, 1e-10, 1e10)
-            alpha_exp = alpha_gamma[None, None, :]
-            beta_exp = beta_gamma
+        if pilot:
+            print(f"[PILOT] Running forward algorithm...")
 
-            log_gamma = ((alpha_exp - 1) * pt.log(y_clipped) -
-                        beta_exp * y_exp +
-                        alpha_exp * pt.log(beta_exp) -
-                        pt.gammaln(alpha_exp))
+        logp_cust, log_alpha_norm = forward_algorithm_scan(log_emission, log_Gamma, pi0)
 
-            log_pos = log_p_pos + log_gamma
-            log_emission = pt.where(pt.eq(y_exp, 0), log_zero, log_pos)
-            log_emission = pt.where(mask_exp, log_emission, 0.0)
-
-            if pilot:
-                print(f"[PILOT] Running forward algorithm...")
-
-            logp_cust, log_alpha_norm = forward_algorithm_scan(log_emission, log_Gamma, pi0)
-
-            alpha_filtered = pt.exp(log_alpha_norm.swapaxes(0, 1))
-            pm.Deterministic("alpha_filtered", alpha_filtered,
-                           dims=("customer", "time", "state"))
+        alpha_filtered = pt.exp(log_alpha_norm.swapaxes(0, 1))
+        pm.Deterministic("alpha_filtered", alpha_filtered,
+                         dims=("customer", "time", "state"))
 
         # =====================================================================
         # 6. LIKELIHOOD
@@ -865,8 +826,8 @@ def main():
 
     parser.add_argument('--csv_path', type=str, required=True,
                         help='Path to simulation or empirical CSV')
-    parser.add_argument('--K', type=int, required=True, choices=[1, 2, 3, 4],
-                        help='Number of hidden states')
+    parser.add_argument('--K', type=int, required=True, choices=[2, 3, 4],
+                        help='Number of hidden states (K≥2 for phase transition study)')
     parser.add_argument('--T', type=int, default=52,
                         help='Target time periods (for simulation data)')
     parser.add_argument('--N', type=int, default=None,
